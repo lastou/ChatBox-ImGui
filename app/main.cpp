@@ -1,10 +1,7 @@
 #include <d3d11.h>
 #include <tchar.h>
 
-#include <chrono>
-#include <iostream>
 #include <string>
-#include <thread>
 #include <zmq.hpp>
 
 #include "imgui.h"
@@ -25,6 +22,11 @@ void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+void connect_socket(zmq::socket_t &socket_request,
+                    const std::string &send_address, bool &is_connected);
+void bind_socket(zmq::socket_t &socket_reply,
+                 const std::string &receive_address, bool &is_bound);
 
 // Main code
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -51,7 +53,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   ::RegisterClassExW(&wc);
   HWND hwnd =
       ::CreateWindowW(wc.lpszClassName, L"ChatBox", WS_OVERLAPPEDWINDOW, 100,
-                      100, (int)(600 * main_scale), (int)(300 * main_scale),
+                      100, (int)(800 * main_scale), (int)(300 * main_scale),
                       nullptr, nullptr, wc.hInstance, nullptr);
 
   // Initialize Direct3D
@@ -103,17 +105,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   window_flags |= ImGuiWindowFlags_NoMove;
   window_flags |= ImGuiWindowFlags_NoResize;
 
-  // ZeroMQ
-  using namespace std::chrono_literals;
-
+  // request and reply socket
   zmq::context_t context_request{1};
   zmq::socket_t socket_request{context_request, zmq::socket_type::req};
-  socket_request.connect("tcp://localhost:5556");
+  zmq::message_t request{};
 
   zmq::context_t context_reply{1};
   zmq::socket_t socket_reply{context_reply, zmq::socket_type::rep};
-  socket_reply.bind("tcp://*:5555");
-  zmq::message_t request{};
   zmq::message_t reply{};
 
   // Main loop
@@ -152,22 +150,41 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
+    // chatbox
     {
       ImGui::SetNextWindowPos(ImVec2(
           0.0f, 0.0f));  // place the next window in the top left corner (0,0)
       ImGui::SetNextWindowSize(
           ImGui::GetIO().DisplaySize);  // make the next window fullscreen
-      ImGui::Begin("imgui window", NULL, window_flags);  // create a window
-      // ImGui::Begin("ChatBox");
+      ImGui::Begin("ChatBox", NULL, window_flags);  // create a window
 
-      static int count = 0;
-      if (ImGui::Button("TestButton")) {
-        ++count;
-      };
+      ImGui::SeparatorText("Config");
+      // send address
+      static char address_send[32] = "tcp://localhost:5555";
+      static bool is_connected = false;
+      ImGui::InputText("Send Address", address_send,
+                       IM_ARRAYSIZE(address_send));
       ImGui::SameLine();
-      ImGui::Text(std::to_string(count).c_str());
+      if (ImGui::Button("Connect")) {
+        connect_socket(socket_request, std::string(address_send), is_connected);
+      }
+      ImGui::SameLine();
+      ImGui::Text(is_connected ? "Connected" : "Disconnected");
 
-      static std::string message{"Received Message"};
+      // receive address
+      static char address_receive[32] = "tcp://*:5556";
+      static bool is_bound = false;
+      ImGui::InputText("Receive Address", address_receive,
+                       IM_ARRAYSIZE(address_receive));
+      ImGui::SameLine();
+      if (ImGui::Button("Bind")) {
+        bind_socket(socket_reply, std::string(address_receive), is_bound);
+      }
+      ImGui::SameLine();
+      ImGui::Text(is_bound ? "Bound" : "Unbound");
+
+      ImGui::SeparatorText("Message");
+      static std::string message{""};
       // receive a request from client
       if (socket_reply.recv(request, zmq::recv_flags::dontwait)) {
         message = request.to_string();
@@ -175,7 +192,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         // send the reply to the client
         socket_reply.send(zmq::buffer("recieved"), zmq::send_flags::dontwait);
       }
-      ImGui::Text(message.c_str());
+      ImGui::LabelText("Received Message", message.c_str());
 
       static bool waiting_for_response{false};
       if (waiting_for_response) {
@@ -183,9 +200,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
           waiting_for_response = false;
         }
       }
-      static char str0[128] = "Hello!";
+
+      static char str0[128] = "";
       ImGui::InputText("message", str0, IM_ARRAYSIZE(str0));
-      if (ImGui::Button("Send")) {
+      if (is_connected && ImGui::Button("Send") && !waiting_for_response) {
         socket_request.send(zmq::buffer(std::string(str0)),
                             zmq::send_flags::dontwait);
         waiting_for_response = true;
@@ -331,4 +349,24 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   }
 
   return ::DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
+void connect_socket(zmq::socket_t &socket_request,
+                    const std::string &send_address, bool &is_connected) {
+  if (is_connected) {
+    socket_request.disconnect(socket_request.get(zmq::sockopt::last_endpoint));
+    is_connected = false;
+  }
+  socket_request.connect(send_address);
+  is_connected = true;
+}
+
+void bind_socket(zmq::socket_t &socket_reply,
+                 const std::string &receive_address, bool &is_bound) {
+  if (is_bound) {
+    socket_reply.unbind(socket_reply.get(zmq::sockopt::last_endpoint));
+    is_bound = false;
+  }
+  socket_reply.bind(receive_address);
+  is_bound = true;
 }
